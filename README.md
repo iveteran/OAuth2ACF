@@ -1,1 +1,1 @@
-Web Server OAuth2 Authentication Flow for iOS, Android and Desktop apps.
+A web server for OAuth2 authentication using the Authorization Code Flow, It enables iOS, Android, and desktop applications to complete OAuth2 authentication.
