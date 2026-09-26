@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/iveteran/OAuth2WebFlow/service"
+	"github.com/iveteran/OAuth2ACF/service"
 	"golang.org/x/oauth2"
 )
 

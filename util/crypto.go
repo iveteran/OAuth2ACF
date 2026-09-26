@@ -12,9 +12,9 @@ import (
 )
 
 func getKey() []byte {
-	key := os.Getenv("TOKEN_KEY")
+	key := os.Getenv("OAUTH2ACF_TOKEN_KEY")
 	if key == "" {
-		panic("TOKEN_KEY not set")
+		panic("OAUTH2ACF_TOKEN_KEY not set")
 	}
 	hash := sha256.Sum256([]byte(key))
 	return hash[:]

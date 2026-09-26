@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/iveteran/OAuth2WebFlow/model"
-	"github.com/iveteran/OAuth2WebFlow/util"
+	"github.com/iveteran/OAuth2ACF/model"
+	"github.com/iveteran/OAuth2ACF/util"
 )
 
 type AuthService struct {
@@ -18,9 +18,11 @@ type AuthService struct {
 	tokens map[string]*oauth2.Token // userId -> oauth2 token
 }
 
-func (s *AuthService) InitDB() {
-	model.InitClientsTable(s.DB)
-	model.InitTokenTable(s.DB)
+func (s *AuthService) InitDB() error {
+	if err := model.InitClientsTable(s.DB); err != nil {
+		return err
+	}
+	return model.InitTokenTable(s.DB)
 }
 
 // 生成授权 URL

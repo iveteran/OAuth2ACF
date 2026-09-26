@@ -11,9 +11,9 @@ import (
 var jwtKey []byte
 
 func init() {
-	k := os.Getenv("JWT_SECRET")
+	k := os.Getenv("OAUTH2ACF_JWT_SECRET")
 	if k == "" {
-		panic("JWT_SECRET must be set")
+		panic("OAUTH2ACF_JWT_SECRET must be set")
 	}
 	jwtKey = []byte(k)
 }

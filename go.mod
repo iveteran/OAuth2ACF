@@ -1,11 +1,9 @@
-module github.com/iveteran/OAuth2WebFlow
+module github.com/iveteran/OAuth2ACF
 
-go 1.23.3
+go 1.26.3
 
 require (
-	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/mattn/go-sqlite3 v1.14.32
-	golang.org/x/oauth2 v0.30.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/mattn/go-sqlite3 v1.14.44
+	golang.org/x/oauth2 v0.36.0
 )
-
-require cloud.google.com/go/compute/metadata v0.3.0 // indirect
