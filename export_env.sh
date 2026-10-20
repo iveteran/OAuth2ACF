@@ -1,0 +1,4 @@
+export OAUTH2ACF_JWT_SECRET="<YOUR_JWT_SECRET>"
+export OAUTH2ACF_TOKEN_KEY="<YOUR_TOKEN_KEY>"
+export OAUTH2ACF_LISTEN_ADDRESS=":9090"
+# Run: source export_env.sh
