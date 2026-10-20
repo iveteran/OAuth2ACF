@@ -26,6 +26,16 @@ go.work.sum
 
 # env file
 .env
+secrets/
+data/
+bin/
+build/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # Editor/IDE
 # .idea/

@@ -2,7 +2,6 @@ package util
 
 import (
 	"errors"
-	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -11,11 +10,7 @@ import (
 var jwtKey []byte
 
 func init() {
-	k := os.Getenv("OAUTH2ACF_JWT_SECRET")
-	if k == "" {
-		panic("OAUTH2ACF_JWT_SECRET must be set")
-	}
-	jwtKey = []byte(k)
+	jwtKey = []byte(loadSecret("OAUTH2ACF_JWT_SECRET", "OAUTH2ACF_JWT_SECRET_FILE"))
 }
 
 // GenerateJWT 返回一个带 user_id 的 JWT（有效期可配置）

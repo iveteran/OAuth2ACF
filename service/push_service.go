@@ -23,10 +23,23 @@ import (
 const pushSessionLifetime = 90 * 24 * time.Hour
 
 type PushAccountProof struct {
-	AccountID    string `json:"accountId"`
-	Provider     string `json:"provider"`
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken,omitempty"`
+	AccountID    string         `json:"accountId"`
+	Provider     string         `json:"provider"`
+	AccessToken  string         `json:"accessToken"`
+	RefreshToken string         `json:"refreshToken,omitempty"`
+	IMAP         *PushIMAPProof `json:"imap,omitempty"`
+}
+
+type PushIMAPProof struct {
+	Email          string `json:"email"`
+	Address        string `json:"address"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	TLS            string `json:"tls"`
+	Mailbox        string `json:"mailbox,omitempty"`
+	PollSeconds    int    `json:"pollSeconds,omitempty"`
+	RecheckSeconds int    `json:"recheckSeconds,omitempty"`
+	MaxMessages    int    `json:"maxMessages,omitempty"`
 }
 
 type PushTokenRequest struct {
@@ -46,12 +59,26 @@ type ProviderConnection struct {
 	Address   string `json:"address"`
 }
 
+type IMAPConnection struct {
+	Subject        string `json:"subject"`
+	AccountID      string `json:"accountId"`
+	Address        string `json:"address"`
+	Username       string `json:"username"`
+	TLS            string `json:"tls"`
+	Mailbox        string `json:"mailbox"`
+	PollSeconds    int    `json:"pollSeconds"`
+	RecheckSeconds int    `json:"recheckSeconds"`
+	MaxMessages    int    `json:"maxMessages"`
+	Revision       string `json:"revision"`
+}
+
 type PushService struct {
 	DB         *sql.DB
 	SigningKey ed25519.PrivateKey
 	Issuer     string
 	Audience   string
 	HTTPClient *http.Client
+	VerifyIMAP func(context.Context, PushIMAPProof) error
 	Now        func() time.Time
 }
 
@@ -76,6 +103,25 @@ func (s *PushService) InitDB() error {
 	);
 	CREATE INDEX IF NOT EXISTS provider_connections_account
 		ON provider_connections(account_id, provider);
+	CREATE TABLE IF NOT EXISTS imap_connections (
+		subject TEXT NOT NULL,
+		account_id TEXT NOT NULL,
+		address TEXT NOT NULL,
+		username TEXT NOT NULL,
+		password TEXT NOT NULL,
+		tls TEXT NOT NULL,
+		mailbox TEXT NOT NULL,
+		poll_seconds INTEGER NOT NULL,
+		recheck_seconds INTEGER NOT NULL,
+		max_messages INTEGER NOT NULL,
+		config_hash BLOB NOT NULL,
+		revision TEXT NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY(subject, account_id),
+		FOREIGN KEY(subject) REFERENCES push_sessions(subject) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS imap_connections_account
+		ON imap_connections(account_id);
 	`)
 	return err
 }
@@ -128,6 +174,15 @@ func (s *PushService) Exchange(ctx context.Context, authorization string, req Pu
 	}
 	if len(verified) > 0 {
 		for _, account := range verified {
+			if account.IMAP != nil {
+				if err = upsertIMAPConnection(ctx, tx, subject, account.AccountID, *account.IMAP, now); err != nil {
+					return PushTokenResponse{}, err
+				}
+				if _, err = tx.ExecContext(ctx, `DELETE FROM provider_connections WHERE subject=? AND account_id=?`, subject, account.AccountID); err != nil {
+					return PushTokenResponse{}, err
+				}
+				continue
+			}
 			if account.RefreshToken == "" {
 				var existing string
 				_ = tx.QueryRowContext(ctx, `SELECT refresh_token FROM provider_connections WHERE subject=? AND account_id=?`, subject, account.AccountID).Scan(&existing)
@@ -140,6 +195,9 @@ func (s *PushService) Exchange(ctx context.Context, authorization string, req Pu
 				VALUES(?,?,?,?,?,?,?) ON CONFLICT(subject,account_id) DO UPDATE SET provider=excluded.provider,provider_user_id=excluded.provider_user_id,provider_address=excluded.provider_address,refresh_token=excluded.refresh_token,updated_at=excluded.updated_at`, subject, account.AccountID, account.Provider, account.ProviderUserID, account.ProviderAddress, account.RefreshToken, now); err != nil {
 				return PushTokenResponse{}, err
 			}
+			if _, err = tx.ExecContext(ctx, `DELETE FROM imap_connections WHERE subject=? AND account_id=?`, subject, account.AccountID); err != nil {
+				return PushTokenResponse{}, err
+			}
 		}
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(verified)), ",")
 		args := []any{subject}
@@ -147,6 +205,9 @@ func (s *PushService) Exchange(ctx context.Context, authorization string, req Pu
 			args = append(args, account.AccountID)
 		}
 		if _, err = tx.ExecContext(ctx, `DELETE FROM provider_connections WHERE subject=? AND account_id NOT IN (`+placeholders+`)`, args...); err != nil {
+			return PushTokenResponse{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM imap_connections WHERE subject=? AND account_id NOT IN (`+placeholders+`)`, args...); err != nil {
 			return PushTokenResponse{}, err
 		}
 	}
@@ -188,6 +249,35 @@ func (s *PushService) Connections(ctx context.Context) ([]ProviderConnection, er
 		result = append(result, connection)
 	}
 	return result, rows.Err()
+}
+
+func (s *PushService) IMAPConnections(ctx context.Context) ([]IMAPConnection, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT subject,account_id,address,username,tls,mailbox,poll_seconds,recheck_seconds,max_messages,revision FROM imap_connections ORDER BY subject,account_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []IMAPConnection
+	for rows.Next() {
+		var connection IMAPConnection
+		if err = rows.Scan(&connection.Subject, &connection.AccountID, &connection.Address, &connection.Username, &connection.TLS, &connection.Mailbox, &connection.PollSeconds, &connection.RecheckSeconds, &connection.MaxMessages, &connection.Revision); err != nil {
+			return nil, err
+		}
+		result = append(result, connection)
+	}
+	return result, rows.Err()
+}
+
+func (s *PushService) IMAPPassword(ctx context.Context, subject, accountID string) (string, error) {
+	var encrypted string
+	if err := s.DB.QueryRowContext(ctx, `SELECT password FROM imap_connections WHERE subject=? AND account_id=?`, subject, accountID).Scan(&encrypted); err != nil {
+		return "", err
+	}
+	plain, err := util.Decrypt(encrypted)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
 }
 
 func (s *PushService) RevokeSession(ctx context.Context, authorization string) error {
@@ -239,9 +329,13 @@ func (s *PushService) ProviderToken(ctx context.Context, subject, accountID stri
 
 type verifiedAccount struct {
 	AccountID, Provider, ProviderUserID, ProviderAddress, RefreshToken string
+	IMAP                                                               *verifiedIMAP
 }
 
 func (s *PushService) verifyProof(ctx context.Context, proof PushAccountProof) (verifiedAccount, error) {
+	if proof.Provider == "selfhosted" {
+		return s.verifyIMAPProof(ctx, proof)
+	}
 	if proof.AccountID == "" || proof.AccessToken == "" || (proof.Provider != "google" && proof.Provider != "microsoft") {
 		return verifiedAccount{}, errors.New("invalid proof")
 	}
@@ -315,7 +409,7 @@ func (s *PushService) sessionSubject(ctx context.Context, authorization string, 
 }
 
 func connectionAccountIDs(ctx context.Context, tx *sql.Tx, subject string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT account_id FROM provider_connections WHERE subject=? ORDER BY account_id`, subject)
+	rows, err := tx.QueryContext(ctx, `SELECT account_id FROM provider_connections WHERE subject=? UNION SELECT account_id FROM imap_connections WHERE subject=? ORDER BY account_id`, subject, subject)
 	if err != nil {
 		return nil, err
 	}

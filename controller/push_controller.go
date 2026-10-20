@@ -78,6 +78,39 @@ func (c *PushController) ProviderToken(w http.ResponseWriter, r *http.Request) {
 	writePushJSON(w, http.StatusOK, map[string]any{"accessToken": token.AccessToken, "expiresAt": token.Expiry})
 }
 
+func (c *PushController) IMAPConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || !c.internal(r) {
+		writePushJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	connections, err := c.Service.IMAPConnections(r.Context())
+	if err != nil {
+		writePushJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "service unavailable"})
+		return
+	}
+	writePushJSON(w, http.StatusOK, map[string]any{"connections": connections})
+}
+
+func (c *PushController) IMAPPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !c.internal(r) {
+		writePushJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var request struct {
+		Subject   string `json:"subject"`
+		AccountID string `json:"accountId"`
+	}
+	if !decodePushJSON(w, r, &request) || request.Subject == "" || request.AccountID == "" {
+		return
+	}
+	password, err := c.Service.IMAPPassword(r.Context(), request.Subject, request.AccountID)
+	if err != nil {
+		writePushJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "IMAP authorization unavailable"})
+		return
+	}
+	writePushJSON(w, http.StatusOK, map[string]string{"password": password})
+}
+
 func (c *PushController) internal(r *http.Request) bool {
 	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 	expected := sha256.Sum256([]byte("Bearer " + c.BrokerKey))

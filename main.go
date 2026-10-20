@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"database/sql"
@@ -9,10 +10,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/iveteran/OAuth2ACF/controller"
+	"github.com/iveteran/OAuth2ACF/model"
 	"github.com/iveteran/OAuth2ACF/service"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -48,7 +52,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		// 记录日志
 		log.Printf("%s %s %d %v %s",
 			r.Method,
-			r.RequestURI,
+			r.URL.Path,
 			lrw.statusCode,
 			time.Since(start),
 			r.RemoteAddr,
@@ -65,6 +69,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer db.Close()
 
 	authService := &service.AuthService{DB: db}
 	authController := &controller.AuthController{Service: authService}
@@ -72,8 +77,34 @@ func main() {
 	if err = authService.InitDB(); err != nil {
 		log.Fatal(err)
 	}
+	if clientsFile := strings.TrimSpace(os.Getenv("OAUTH2ACF_CLIENTS_FILE")); clientsFile != "" {
+		importCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = model.ImportOAuthClients(importCtx, db, clientsFile)
+		cancel()
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Print("OAuth client configuration imported")
+	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if db.PingContext(ctx) != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"database unavailable"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	})
 	mux.HandleFunc("/authorize", authController.Authorize)
 	mux.HandleFunc("/callback", authController.Callback)
 	mux.HandleFunc("/get_token", authController.GetToken)
@@ -86,6 +117,8 @@ func main() {
 		mux.HandleFunc("/v1/push/session", pushController.Session)
 		mux.HandleFunc("/internal/v1/provider-connections", pushController.Connections)
 		mux.HandleFunc("/internal/v1/provider-token", pushController.ProviderToken)
+		mux.HandleFunc("/internal/v1/imap-connections", pushController.IMAPConnections)
+		mux.HandleFunc("/internal/v1/imap-password", pushController.IMAPPassword)
 	}
 
 	// 使用日志中间件包装处理器
@@ -100,9 +133,30 @@ func main() {
 	log.Printf("Server listening at %s\n", listenAddress)
 	log.Printf("NOTE: Override listening address with the OAUTH2ACF_LISTEN_ADDRESS environment variable if needed.")
 
-	err = http.ListenAndServe(listenAddress, loggedMux)
-	if err != nil {
-		log.Fatalf("HTTP server failed: %v", err)
+	server := &http.Server{
+		Addr:              listenAddress,
+		Handler:           loggedMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case <-signalCtx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err = server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown failed: %v", err)
+		}
+	case err = <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP server failed: %v", err)
+		}
 	}
 }
 

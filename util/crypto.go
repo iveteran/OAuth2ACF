@@ -3,19 +3,24 @@ package util
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"os"
 )
 
+// Fingerprint compares encrypted-secret records without storing a plaintext
+// password hash that could be used for offline guessing after a DB leak.
+func Fingerprint(data []byte) []byte {
+	h := hmac.New(sha256.New, getKey())
+	_, _ = h.Write(data)
+	return h.Sum(nil)
+}
+
 func getKey() []byte {
-	key := os.Getenv("OAUTH2ACF_TOKEN_KEY")
-	if key == "" {
-		panic("OAUTH2ACF_TOKEN_KEY not set")
-	}
+	key := loadSecret("OAUTH2ACF_TOKEN_KEY", "OAUTH2ACF_TOKEN_KEY_FILE")
 	hash := sha256.Sum256([]byte(key))
 	return hash[:]
 }

@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+secrets
+data
+bin
+build
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+coverage.*
+*.out

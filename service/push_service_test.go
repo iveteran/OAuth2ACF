@@ -81,3 +81,115 @@ func TestPushExchangeSignsScopedJWTAndRevokeDeletesConnections(t *testing.T) {
 		t.Fatal("revoked session remained valid")
 	}
 }
+
+func TestPushExchangeStoresVerifiedIMAPConnectionAndRotatesRevision(t *testing.T) {
+	t.Setenv("OAUTH2ACF_TOKEN_KEY", "test-provider-token-key")
+	db, err := sql.Open("sqlite3", "file:imap-push-test?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := 0
+	service := &PushService{
+		DB: db, SigningKey: privateKey, Issuer: "https://accounts.example", Audience: "icchat-push",
+		VerifyIMAP: func(_ context.Context, proof PushIMAPProof) error {
+			verified++
+			if proof.Username != "user@example.com" || proof.Password == "" {
+				t.Fatal("unexpected IMAP proof")
+			}
+			return nil
+		},
+	}
+	if err = service.InitDB(); err != nil {
+		t.Fatal(err)
+	}
+	request := PushTokenRequest{Accounts: []PushAccountProof{{
+		AccountID: "selfHosted:user@example.com", Provider: "selfhosted",
+		IMAP: &PushIMAPProof{Email: "user@example.com", Address: "imap.example.com:993", Username: "user@example.com", Password: "secret", TLS: "tls"},
+	}}}
+	issued, err := service.Exchange(context.Background(), "", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections, err := service.IMAPConnections(context.Background())
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("unexpected IMAP connections: %#v, %v", connections, err)
+	}
+	firstRevision := connections[0].Revision
+	if connections[0].Mailbox != "INBOX" || connections[0].PollSeconds != 120 || firstRevision == "" {
+		t.Fatalf("defaults or revision missing: %#v", connections[0])
+	}
+	password, err := service.IMAPPassword(context.Background(), connections[0].Subject, connections[0].AccountID)
+	if err != nil || password != "secret" {
+		t.Fatalf("password did not round trip: %q, %v", password, err)
+	}
+
+	second, err := service.Exchange(context.Background(), "Bearer "+issued.SessionToken, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections, _ = service.IMAPConnections(context.Background())
+	if connections[0].Revision != firstRevision {
+		t.Fatal("unchanged credentials restarted the monitor")
+	}
+	request.Accounts[0].IMAP.Password = "rotated"
+	third, err := service.Exchange(context.Background(), "Bearer "+second.SessionToken, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections, _ = service.IMAPConnections(context.Background())
+	if connections[0].Revision == firstRevision {
+		t.Fatal("credential rotation did not change monitor revision")
+	}
+	if verified != 3 {
+		t.Fatalf("proof verifier called %d times", verified)
+	}
+	if err = service.RevokeSession(context.Background(), "Bearer "+third.SessionToken); err != nil {
+		t.Fatal(err)
+	}
+	connections, err = service.IMAPConnections(context.Background())
+	if err != nil || len(connections) != 0 {
+		t.Fatalf("IMAP connection retained after revoke: %#v, %v", connections, err)
+	}
+}
+
+func TestPushExchangeRejectsInsecureOrMismatchedIMAPProof(t *testing.T) {
+	t.Setenv("OAUTH2ACF_TOKEN_KEY", "test-provider-token-key")
+	db, err := sql.Open("sqlite3", "file:invalid-imap-push-test?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	service := &PushService{DB: db, SigningKey: privateKey, Issuer: "issuer", Audience: "audience", VerifyIMAP: func(context.Context, PushIMAPProof) error {
+		t.Fatal("invalid proof reached the network verifier")
+		return nil
+	}}
+	if err = service.InitDB(); err != nil {
+		t.Fatal(err)
+	}
+	for _, proof := range []PushAccountProof{
+		{AccountID: "selfHosted:other@example.com", Provider: "selfhosted", IMAP: &PushIMAPProof{Email: "user@example.com", Address: "imap.example.com:993", Username: "user", Password: "secret", TLS: "tls"}},
+		{AccountID: "selfHosted:user@example.com", Provider: "selfhosted", IMAP: &PushIMAPProof{Email: "user@example.com", Address: "imap.example.com:143", Username: "user", Password: "secret", TLS: "plain"}},
+	} {
+		if _, err = service.Exchange(context.Background(), "", PushTokenRequest{Accounts: []PushAccountProof{proof}}); err == nil {
+			t.Fatal("invalid IMAP proof was accepted")
+		}
+	}
+}
+
+func TestIMAPProofDialTargetRejectsPrivateNetworks(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:993", "10.0.0.1:993", "100.64.0.1:993", "[::1]:993"} {
+		if _, err := publicIMAPDialAddress(context.Background(), address); err == nil {
+			t.Fatalf("private IMAP target %s was accepted", address)
+		}
+	}
+	address, err := publicIMAPDialAddress(context.Background(), "8.8.8.8:993")
+	if err != nil || address != "8.8.8.8:993" {
+		t.Fatalf("public IMAP target rejected: %q %v", address, err)
+	}
+}

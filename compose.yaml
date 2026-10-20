@@ -1,0 +1,29 @@
+services:
+  oauth2acf:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      OAUTH2ACF_LISTEN_ADDRESS: 0.0.0.0:9090
+      OAUTH2ACF_DATABASE_PATH: /data/oauth2.db
+      OAUTH2ACF_CLIENTS_FILE: /run/secrets/oauth-clients.json
+    volumes:
+      - oauth2acf-data:/data
+      - ./secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 25s
+
+volumes:
+  oauth2acf-data:
+    name: oauth2acf-data
