@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/oauth2"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -79,6 +81,62 @@ func TestPushExchangeSignsScopedJWTAndRevokeDeletesConnections(t *testing.T) {
 	}
 	if err = service.RevokeSession(context.Background(), "Bearer "+rotated.SessionToken); err == nil {
 		t.Fatal("revoked session remained valid")
+	}
+}
+
+func TestProviderTokenUsesPublicRefreshClient(t *testing.T) {
+	t.Setenv("OAUTH2ACF_TOKEN_KEY", "test-provider-token-key")
+	db, err := sql.Open("sqlite3", "file:provider-refresh-test?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	service := &PushService{
+		DB: db, SigningKey: privateKey, Issuer: "issuer", Audience: "audience",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sub":"subject-1","email":"test@example.com"}`)), Header: make(http.Header)}, nil
+		})},
+	}
+	if err = service.InitDB(); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := service.Exchange(context.Background(), "", PushTokenRequest{Accounts: []PushAccountProof{{
+		AccountID: "google:subject-1", Provider: "google", AccessToken: "access", RefreshToken: "refresh-old",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO provider_refresh_clients(provider,client_id,client_secret,scopes,token_url) VALUES(?,?,?,?,?)`,
+		"google", "native-client", "", "openid,email", "placeholder"); err != nil {
+		t.Fatal(err)
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("client_id") != "native-client" || r.Form.Get("client_secret") != "" ||
+			r.Form.Get("refresh_token") != "refresh-old" || r.Header.Get("Authorization") != "" {
+			t.Fatalf("unexpected refresh request: form=%v authorization=%q", r.Form, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"access-new","refresh_token":"refresh-new","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer tokenServer.Close()
+	if _, err = db.Exec(`UPDATE provider_refresh_clients SET token_url=? WHERE provider='google'`, tokenServer.URL); err != nil {
+		t.Fatal(err)
+	}
+	connections, err := service.Connections(context.Background())
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("unexpected connections: %#v %v", connections, err)
+	}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenServer.Client())
+	token, err := service.ProviderToken(ctx, connections[0].Subject, connections[0].AccountID)
+	if err != nil || token.AccessToken != "access-new" {
+		t.Fatalf("public refresh failed: %#v %v", token, err)
+	}
+	if err = service.RevokeSession(context.Background(), "Bearer "+issued.SessionToken); err != nil {
+		t.Fatal(err)
 	}
 }
 

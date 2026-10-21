@@ -323,7 +323,9 @@ Mail.Read
     "redirectUri": "https://accounts.example.com/callback",
     "scopes": "openid,email,profile,https://www.googleapis.com/auth/gmail.readonly",
     "authUrl": "https://accounts.google.com/o/oauth2/v2/auth",
-    "tokenUrl": "https://oauth2.googleapis.com/token"
+    "tokenUrl": "https://oauth2.googleapis.com/token",
+    "refreshClientId": "App实际使用的Google移动端Client ID",
+    "refreshTokenUrl": "https://oauth2.googleapis.com/token"
   },
   {
     "provider": "microsoft",
@@ -332,7 +334,9 @@ Mail.Read
     "redirectUri": "https://accounts.example.com/callback",
     "scopes": "openid,email,profile,offline_access,User.Read,Mail.Read",
     "authUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-    "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    "refreshClientId": "App实际使用的Microsoft移动端Client ID",
+    "refreshTokenUrl": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
   }
 ]
 ```
@@ -348,6 +352,15 @@ Mail.Read
 - 启动时在事务内 upsert；
 - JSON 省略旧 provider 不会删除数据库旧记录；
 - 修改后必须重启容器。
+
+`clientId`、`clientSecret`、`redirectUri`、`authUrl` 和 `tokenUrl` 属于
+OAuth2ACF 自身的 Web OAuth 流程。`refreshClientId` 和 `refreshTokenUrl`
+专门用于刷新 App 上传的移动端 refresh token，必须与 App
+登录时使用的 OAuth Client ID 和权限一致。移动端 public client 不填写
+`refreshClientSecret`；只有 App 本身使用 confidential client 签发 refresh token
+时才填写该字段。`refreshScopes` 可选；默认省略以沿用 refresh token 原授权范围，
+只有需要收窄权限时才配置。未配置 `refreshClientId` 的旧安装会继续回退到 Web OAuth
+客户端，以保持升级兼容，但移动端和 Web Client ID 不同的部署会继续刷新失败。
 
 ## 9. 配置 .env
 

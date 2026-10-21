@@ -6,7 +6,9 @@
     "redirectUri": "https://accounts.example.com/callback",
     "scopes": "openid,email,profile,https://www.googleapis.com/auth/gmail.readonly",
     "authUrl": "https://accounts.google.com/o/oauth2/v2/auth",
-    "tokenUrl": "https://oauth2.googleapis.com/token"
+    "tokenUrl": "https://oauth2.googleapis.com/token",
+    "refreshClientId": "replace-with-the-google-client-id-used-by-the-app",
+    "refreshTokenUrl": "https://oauth2.googleapis.com/token"
   },
   {
     "provider": "microsoft",
@@ -15,6 +17,8 @@
     "redirectUri": "https://accounts.example.com/callback",
     "scopes": "openid,email,profile,offline_access,User.Read,Mail.Read",
     "authUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-    "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    "refreshClientId": "replace-with-the-microsoft-client-id-used-by-the-app",
+    "refreshTokenUrl": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
   }
 ]

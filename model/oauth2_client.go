@@ -15,13 +15,28 @@ import (
 )
 
 type OAuthClient struct {
-	Provider     string `json:"provider"`
-	ClientID     string `json:"clientId"`
-	ClientSecret string `json:"clientSecret"`
-	RedirectURI  string `json:"redirectUri"`
-	Scopes       string `json:"scopes"`
-	AuthURL      string `json:"authUrl"`
-	TokenURL     string `json:"tokenUrl"`
+	Provider            string `json:"provider"`
+	ClientID            string `json:"clientId"`
+	ClientSecret        string `json:"clientSecret"`
+	RedirectURI         string `json:"redirectUri"`
+	Scopes              string `json:"scopes"`
+	AuthURL             string `json:"authUrl"`
+	TokenURL            string `json:"tokenUrl"`
+	RefreshClientID     string `json:"refreshClientId,omitempty"`
+	RefreshClientSecret string `json:"refreshClientSecret,omitempty"`
+	RefreshScopes       string `json:"refreshScopes,omitempty"`
+	RefreshTokenURL     string `json:"refreshTokenUrl,omitempty"`
+}
+
+// ProviderRefreshClient is the native/public OAuth client that issued the
+// refresh tokens uploaded by the app. It is separate from the confidential web
+// client used by /authorize and /callback.
+type ProviderRefreshClient struct {
+	Provider     string
+	ClientID     string
+	ClientSecret string
+	Scopes       string
+	TokenURL     string
 }
 
 var providerName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -37,6 +52,13 @@ func InitClientsTable(db *sql.DB) error {
 		scopes TEXT,
 		auth_url TEXT,
 		token_url TEXT
+	);
+	CREATE TABLE IF NOT EXISTS provider_refresh_clients (
+		provider TEXT PRIMARY KEY,
+		client_id TEXT NOT NULL,
+		client_secret TEXT NOT NULL,
+		scopes TEXT NOT NULL,
+		token_url TEXT NOT NULL
 	)`)
 	return err
 }
@@ -50,6 +72,26 @@ func (c *OAuthClient) ToConfig() *oauth2.Config {
 		Endpoint: oauth2.Endpoint{
 			AuthURL:  c.AuthURL,
 			TokenURL: c.TokenURL,
+		},
+	}
+}
+
+func (c *ProviderRefreshClient) ToConfig() *oauth2.Config {
+	authStyle := oauth2.AuthStyleAutoDetect
+	if c.ClientSecret == "" {
+		authStyle = oauth2.AuthStyleInParams
+	}
+	var scopes []string
+	if c.Scopes != "" {
+		scopes = strings.Split(c.Scopes, ",")
+	}
+	return &oauth2.Config{
+		ClientID:     c.ClientID,
+		ClientSecret: c.ClientSecret,
+		Scopes:       scopes,
+		Endpoint: oauth2.Endpoint{
+			TokenURL:  c.TokenURL,
+			AuthStyle: authStyle,
 		},
 	}
 }
@@ -72,6 +114,26 @@ func GetOAuthClient(db *sql.DB, provider string) (*OAuthClient, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// GetProviderRefreshClient returns the explicit native refresh client when one
+// is configured. Existing installations fall back to their web OAuth client so
+// the schema migration itself does not interrupt service.
+func GetProviderRefreshClient(db *sql.DB, provider string) (*ProviderRefreshClient, error) {
+	row := db.QueryRow(`SELECT provider,client_id,client_secret,scopes,token_url
+		FROM provider_refresh_clients WHERE lower(provider)=lower(?)`, provider)
+	client := &ProviderRefreshClient{}
+	if err := row.Scan(&client.Provider, &client.ClientID, &client.ClientSecret, &client.Scopes, &client.TokenURL); err == nil {
+		return client, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	legacy, err := GetOAuthClient(db, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &ProviderRefreshClient{Provider: legacy.Provider, ClientID: legacy.ClientID,
+		ClientSecret: legacy.ClientSecret, Scopes: legacy.Scopes, TokenURL: legacy.TokenURL}, nil
 }
 
 // ImportOAuthClients validates and upserts a declarative client configuration.
@@ -114,6 +176,16 @@ func ImportOAuthClients(ctx context.Context, db *sql.DB, path string) error {
 			client.Scopes, client.AuthURL, client.TokenURL); err != nil {
 			return err
 		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM provider_refresh_clients WHERE provider=?`, client.Provider); err != nil {
+			return err
+		}
+		if client.RefreshClientID != "" {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_refresh_clients(provider,client_id,client_secret,scopes,token_url)
+				VALUES(?,?,?,?,?)`, client.Provider, client.RefreshClientID, client.RefreshClientSecret,
+				client.RefreshScopes, client.RefreshTokenURL); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }
@@ -126,6 +198,10 @@ func normalizeOAuthClient(client *OAuthClient) {
 	client.Scopes = strings.TrimSpace(client.Scopes)
 	client.AuthURL = strings.TrimSpace(client.AuthURL)
 	client.TokenURL = strings.TrimSpace(client.TokenURL)
+	client.RefreshClientID = strings.TrimSpace(client.RefreshClientID)
+	client.RefreshClientSecret = strings.TrimSpace(client.RefreshClientSecret)
+	client.RefreshScopes = strings.TrimSpace(client.RefreshScopes)
+	client.RefreshTokenURL = strings.TrimSpace(client.RefreshTokenURL)
 }
 
 func validateOAuthClient(client OAuthClient) error {
@@ -143,6 +219,24 @@ func validateOAuthClient(client OAuthClient) error {
 	}
 	if !secureURL(client.AuthURL, false) || !secureURL(client.TokenURL, false) || !secureURL(client.RedirectURI, true) {
 		return errors.New("invalid OAuth URL")
+	}
+	hasRefresh := client.RefreshClientID != "" || client.RefreshClientSecret != "" ||
+		client.RefreshScopes != "" || client.RefreshTokenURL != ""
+	if hasRefresh {
+		if client.RefreshClientID == "" ||
+			len(client.RefreshClientID) > 4096 || len(client.RefreshClientSecret) > 16384 ||
+			len(client.RefreshScopes) > 8192 ||
+			strings.ContainsAny(client.RefreshClientID+client.RefreshClientSecret+client.RefreshScopes, "\x00\r\n") ||
+			!secureURL(client.RefreshTokenURL, false) {
+			return errors.New("invalid provider refresh client")
+		}
+		if client.RefreshScopes != "" {
+			for _, scope := range strings.Split(client.RefreshScopes, ",") {
+				if strings.TrimSpace(scope) == "" {
+					return errors.New("invalid provider refresh scopes")
+				}
+			}
+		}
 	}
 	return nil
 }

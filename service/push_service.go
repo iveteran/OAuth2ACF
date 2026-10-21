@@ -82,7 +82,24 @@ type PushService struct {
 	Now        func() time.Time
 }
 
+// ProviderTokenFailure exposes only fields safe for operational logs. The
+// wrapped error remains available to tests and callers, but controllers must
+// never log it because provider descriptions can contain credential material.
+type ProviderTokenFailure struct {
+	Provider  string
+	Reason    string
+	Status    int
+	OAuthCode string
+	err       error
+}
+
+func (e *ProviderTokenFailure) Error() string { return "provider authorization unavailable" }
+func (e *ProviderTokenFailure) Unwrap() error { return e.err }
+
 func (s *PushService) InitDB() error {
+	if err := model.InitClientsTable(s.DB); err != nil {
+		return err
+	}
 	_, err := s.DB.Exec(`
 	CREATE TABLE IF NOT EXISTS push_sessions (
 		subject TEXT PRIMARY KEY,
@@ -300,19 +317,27 @@ func (s *PushService) ProviderToken(ctx context.Context, subject, accountID stri
 	var provider, encrypted string
 	err := s.DB.QueryRowContext(ctx, `SELECT provider,refresh_token FROM provider_connections WHERE subject=? AND account_id=?`, subject, accountID).Scan(&provider, &encrypted)
 	if err != nil {
-		return nil, err
+		return nil, &ProviderTokenFailure{Reason: "connection_lookup", err: err}
 	}
 	plain, err := util.Decrypt(encrypted)
 	if err != nil {
-		return nil, err
+		return nil, &ProviderTokenFailure{Provider: provider, Reason: "credential_decrypt", err: err}
 	}
-	client, err := model.GetOAuthClient(s.DB, provider)
+	client, err := model.GetProviderRefreshClient(s.DB, provider)
 	if err != nil {
-		return nil, err
+		return nil, &ProviderTokenFailure{Provider: provider, Reason: "client_configuration", err: err}
 	}
 	token, err := client.ToConfig().TokenSource(ctx, &oauth2.Token{RefreshToken: string(plain)}).Token()
 	if err != nil {
-		return nil, err
+		failure := &ProviderTokenFailure{Provider: provider, Reason: "token_endpoint", OAuthCode: "unknown", err: err}
+		var retrieve *oauth2.RetrieveError
+		if errors.As(err, &retrieve) {
+			failure.OAuthCode = safeOAuthCode(retrieve.ErrorCode)
+			if retrieve.Response != nil {
+				failure.Status = retrieve.Response.StatusCode
+			}
+		}
+		return nil, failure
 	}
 	if token.RefreshToken != "" && token.RefreshToken != string(plain) {
 		rotated, sealErr := util.Encrypt([]byte(token.RefreshToken))
@@ -325,6 +350,19 @@ func (s *PushService) ProviderToken(ctx context.Context, subject, accountID stri
 		}
 	}
 	return token, nil
+}
+
+func safeOAuthCode(value string) string {
+	if value == "" || len(value) > 64 {
+		return "unknown"
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
+			return "unknown"
+		}
+	}
+	return value
 }
 
 type verifiedAccount struct {

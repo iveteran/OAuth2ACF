@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -72,6 +74,13 @@ func (c *PushController) ProviderToken(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := c.Service.ProviderToken(r.Context(), request.Subject, request.AccountID)
 	if err != nil {
+		var failure *service.ProviderTokenFailure
+		if errors.As(err, &failure) {
+			log.Printf("provider token unavailable provider=%s reason=%s status=%d oauth_error=%s",
+				failure.Provider, failure.Reason, failure.Status, failure.OAuthCode)
+		} else {
+			log.Print("provider token unavailable reason=internal")
+		}
 		writePushJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "provider authorization unavailable"})
 		return
 	}
