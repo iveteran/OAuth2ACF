@@ -67,7 +67,42 @@ renewed. OAuth client IDs, consent-screen publication, provider scopes and
 redirect URIs still have to be configured in Google Cloud and Microsoft Entra;
 those are deployment credentials rather than source code.
 
-Self-hosted server monitoring is accepted only for password-based IMAP over
-implicit TLS or STARTTLS. OAuth2ACF verifies the login and read-only access to
-the selected mailbox before storing it. Plaintext IMAP and JMAP accounts remain
-on the App's local listener and are not uploaded for remote monitoring.
+Self-hosted server monitoring supports password-based IMAP over TLS/STARTTLS
+and JMAP over HTTPS. OAuth2ACF verifies mailbox access before storing encrypted
+credentials. Plaintext connections and OIDC/XOAUTH2 remain on the App's local
+listener and are not uploaded for remote monitoring.
+
+## 自建 IMAP / JMAP 推送账号
+
+`POST /v1/push/token` 的 `accounts` 支持 `provider: "selfhosted"`。
+每项必须恰好包含一个 `imap` 或 `jmap` 证明，不发送本地 sh1 句柄、accessToken
+或 refreshToken。IMAP 使用现有 TLS/STARTTLS 密码验证；JMAP 示例：
+
+```json
+{
+  "accounts": [{
+    "accountId": "selfHosted:user@example.com",
+    "provider": "selfhosted",
+    "jmap": {
+      "email": "user@example.com",
+      "sessionUrl": "https://mail.example.com/.well-known/jmap",
+      "username": "user@example.com",
+      "password": "app-specific-password"
+    }
+  }]
+}
+```
+
+JMAP 验证同源 HTTPS Session 和 Email/get 权限，空 ids 不读取邮件内容。
+实际连接解析并固定公网 IP，拒绝私网地址、跨 origin 跳转和环境代理。
+密码经现有加密密钥加密保存，配置散列使用 HMAC 指纹；请保留当前加密密钥。
+`InitDB` 自动创建带会话外键的 `jmap_connections`，无需清空旧数据库。
+
+broker key 保护的内部接口新增：
+
+- `GET /internal/v1/jmap-connections`：仅返回主体、账号、sessionUrl、username、revision。
+- `POST /internal/v1/jmap-password`：请求 `{ "subject": "...", "accountId": "..." }`，返回密码。
+
+上述内部接口仅开放给 icchat-fcm。账号移除、IMAP/JMAP 协议切换或会话撤销时，
+旧协议的加密凭据会在事务内移除。当前不支持自建账号 OIDC/XOAUTH2 的后台凭据续期。
+部署先升级账户服务，再升级推送服务，最后升级 App。

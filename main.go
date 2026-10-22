@@ -119,6 +119,8 @@ func main() {
 		mux.HandleFunc("/internal/v1/provider-token", pushController.ProviderToken)
 		mux.HandleFunc("/internal/v1/imap-connections", pushController.IMAPConnections)
 		mux.HandleFunc("/internal/v1/imap-password", pushController.IMAPPassword)
+		mux.HandleFunc("/internal/v1/jmap-connections", pushController.JMAPConnections)
+		mux.HandleFunc("/internal/v1/jmap-password", pushController.JMAPPassword)
 	}
 
 	// 使用日志中间件包装处理器

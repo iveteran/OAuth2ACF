@@ -28,6 +28,7 @@ type PushAccountProof struct {
 	AccessToken  string         `json:"accessToken"`
 	RefreshToken string         `json:"refreshToken,omitempty"`
 	IMAP         *PushIMAPProof `json:"imap,omitempty"`
+	JMAP         *PushJMAPProof `json:"jmap,omitempty"`
 }
 
 type PushIMAPProof struct {
@@ -79,6 +80,7 @@ type PushService struct {
 	Audience   string
 	HTTPClient *http.Client
 	VerifyIMAP func(context.Context, PushIMAPProof) error
+	VerifyJMAP func(context.Context, PushJMAPProof) error
 	Now        func() time.Time
 }
 
@@ -139,7 +141,14 @@ func (s *PushService) InitDB() error {
 	);
 	CREATE INDEX IF NOT EXISTS imap_connections_account
 		ON imap_connections(account_id);
-	`)
+ CREATE TABLE IF NOT EXISTS jmap_connections (
+ subject TEXT NOT NULL, account_id TEXT NOT NULL,
+ session_url TEXT NOT NULL, username TEXT NOT NULL, password TEXT NOT NULL,
+ config_hash BLOB NOT NULL, revision TEXT NOT NULL, updated_at DATETIME NOT NULL,
+ PRIMARY KEY(subject,account_id),
+ FOREIGN KEY(subject) REFERENCES push_sessions(subject) ON DELETE CASCADE
+ );
+ `)
 	return err
 }
 
@@ -191,6 +200,20 @@ func (s *PushService) Exchange(ctx context.Context, authorization string, req Pu
 	}
 	if len(verified) > 0 {
 		for _, account := range verified {
+			if account.JMAP != nil {
+				if err = upsertJMAPConnection(ctx, tx, subject, account.AccountID, *account.JMAP, now); err != nil {
+					return PushTokenResponse{}, err
+				}
+				for _, table := range []string{"imap_connections", "provider_connections"} {
+					if _, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE subject=? AND account_id=?", subject, account.AccountID); err != nil {
+						return PushTokenResponse{}, err
+					}
+				}
+				continue
+			}
+			if _, err = tx.ExecContext(ctx, "DELETE FROM jmap_connections WHERE subject=? AND account_id=?", subject, account.AccountID); err != nil {
+				return PushTokenResponse{}, err
+			}
 			if account.IMAP != nil {
 				if err = upsertIMAPConnection(ctx, tx, subject, account.AccountID, *account.IMAP, now); err != nil {
 					return PushTokenResponse{}, err
@@ -225,6 +248,9 @@ func (s *PushService) Exchange(ctx context.Context, authorization string, req Pu
 			return PushTokenResponse{}, err
 		}
 		if _, err = tx.ExecContext(ctx, `DELETE FROM imap_connections WHERE subject=? AND account_id NOT IN (`+placeholders+`)`, args...); err != nil {
+			return PushTokenResponse{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM jmap_connections WHERE subject=? AND account_id NOT IN (`+placeholders+`)`, args...); err != nil {
 			return PushTokenResponse{}, err
 		}
 	}
@@ -368,11 +394,21 @@ func safeOAuthCode(value string) string {
 type verifiedAccount struct {
 	AccountID, Provider, ProviderUserID, ProviderAddress, RefreshToken string
 	IMAP                                                               *verifiedIMAP
+	JMAP                                                               *verifiedJMAP
 }
 
 func (s *PushService) verifyProof(ctx context.Context, proof PushAccountProof) (verifiedAccount, error) {
 	if proof.Provider == "selfhosted" {
+		if (proof.IMAP == nil) == (proof.JMAP == nil) {
+			return verifiedAccount{}, errors.New("one mail proof required")
+		}
+		if proof.JMAP != nil {
+			return s.verifyJMAPProof(ctx, proof)
+		}
 		return s.verifyIMAPProof(ctx, proof)
+	}
+	if proof.IMAP != nil || proof.JMAP != nil {
+		return verifiedAccount{}, errors.New("unexpected mail proof")
 	}
 	if proof.AccountID == "" || proof.AccessToken == "" || (proof.Provider != "google" && proof.Provider != "microsoft") {
 		return verifiedAccount{}, errors.New("invalid proof")
@@ -447,7 +483,7 @@ func (s *PushService) sessionSubject(ctx context.Context, authorization string, 
 }
 
 func connectionAccountIDs(ctx context.Context, tx *sql.Tx, subject string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT account_id FROM provider_connections WHERE subject=? UNION SELECT account_id FROM imap_connections WHERE subject=? ORDER BY account_id`, subject, subject)
+	rows, err := tx.QueryContext(ctx, `SELECT account_id FROM provider_connections WHERE subject=? UNION SELECT account_id FROM imap_connections WHERE subject=? UNION SELECT account_id FROM jmap_connections WHERE subject=? ORDER BY account_id`, subject, subject, subject)
 	if err != nil {
 		return nil, err
 	}
